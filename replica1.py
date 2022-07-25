@@ -1,86 +1,29 @@
-from concurrent.futures import thread
-import socket
+# replica de id 1
+
 import select
-import threading
+import socket
 import sys
 import json
-from time import sleep
 
-# replica de id 1
-id = 1
-
-# endereço da réplica
 HOST = 'localhost'
 PORTA = 5001
 
-# endereços das outras réplicas
 replicas = [(HOST, 5002), (HOST, 5003), (HOST, 5004)]
 
-#define a lista de I/O de interesse
-entradas = [sys.stdin]
-
-#armazena historico de conexoes 
-conexoes = {}
-
-mutex = threading.Lock()
+# id da réplica
+id = 1
 
 # dado replicado
 x = 0
 
-# histórico de alterações
-hist = []
-
 # booleanque determina se a réplica detém a cópia primária
 copiaPrim = True
 
-# status da réplica: 0 se livre e 1 se ocupada
-status = 0
+entradas = [sys.stdin]
+conexoes = {}
 
-# retorna o valor atual de x na réplica
-def getX():
-    return x
-
-# retorna o histórico de alterações do valor de x
-def getHist():
-    return hist
-
-# retorna o status da réplica 
-def getStatus():
-    return status
-
-# retorna se a réplica detém, ou não, a cópia
-def getCopia():
-    return copiaPrim
-
-# atualiza o histórico de alterações com a tupla (replicaId, novoValorDeX)
-def updateHist(replicaId, novoValor):
-    hist.append((replicaId, novoValor))
-    return hist
-
-# atualiza o status da réplica
-def updateStatus(novoStatus):
-    if novoStatus not in [0,1]:
-        return -1
-    else:
-        status = novoStatus
-        return status
-
-# atualiza a posse da cópia primária
-def updateCopia():
-    copiaPrim = not copiaPrim
-    return copiaPrim
-
-# altera o valor de x
-def updateX(replicaId, novoValor):
-
-    if(copiaPrim):
-        x = novoValor
-        res = updateHist(replicaId, x)
-        print(f"Valor de x alterado para {novoValor} pela réplica {replicaId}")
-        return res
-    else:
-        # encrontrar a cópia primaria
-        pass
+# histórico de alterações
+hist = []
 
 # inicia o servidor
 def init():
@@ -119,81 +62,159 @@ def aceitaConexao(sock):
 	clisock, endr = sock.accept()
 
 	# registra a nova conexao
-	conexoes[clisock] = endr 
+	conexoes[endr[1]] = clisock 
 
 	return clisock, endr
 
-# toma posse da cópia primaria
-def pedeCopiaPrim(sock):
-    # flag que determina se a replica conseguiu a cópia primária
-    copiaResgatada = False
-
-    while not copiaResgatada:
-        msg = {'operacao': 'getStatus'}
+# atualiza as outras replicas com o novo valor de x
+def updateReplicas(novoValor):
+    global id
+    for replica in replicas:
+        sock = socket.socket()
+        sock.connect(replica)
+        msg = {'operacao': 'updateX', 'novoX': novoValor, 'replicaId': id}
         enviaMensagem(msg, sock)
-        res = recebeMensagem(sock)
-        if res == 0:
-            msg = {'operacao': 'updateCopia'}
-            enviaMensagem(msg, sock)
-            res = recebeMensagem(sock)
-            # tratar possível erro
-            updateCopia()
-            copiaResgatada = True
-        else:
-            sleep(1)
-            continue
+        sock.close()
+        
+# atualiza a posse da cópia primária
+def updateCopia():
+    global copiaPrim
+    copiaPrim = not copiaPrim
+    return copiaPrim
 
 # recebe um pedido de atualização de outra réplica
 def atendeRequisicoes(clisock, endr):
 
-    while True:
+    # recebe dados do cliente
+    data = recebeMensagem(clisock)
+    print(data)
+    if not data:  # dados vazios: cliente encerrou
+        print(str(endr) + '-> encerrou')
+        clisock.close()  # encerra a conexao com o cliente
+        return
 
-		# recebe uma tupla (replicaId, NovoValorDeX)
-        data = clisock.recv(1024) 
+    operacao = data['operacao']
 
-        if not data: # dados vazios: cliente encerrou
-            print(str(endr) + '-> encerrou')
-            clisock.close() # encerra a conexao com o cliente
-            return 
+    if operacao == 'updateX':
+        #params = data['params'][1:-1].split(',')
+        novoX = data['novoX']
+        novoValor = int(novoX)
+        replicaId = int(data['replicaId'])
+        #replicaId = int(params[0])
+        setX(novoValor, replicaId)
+        #getX()
+        #updateHist(replicaId, novoValor)
+    elif operacao == 'updateCopia':
+        global copiaPrim
+        print('recebi um pedido pra entregar a cópia')
+        print(f'minha cópia: {copiaPrim}')
+        if copiaPrim == True:
+            updateCopia()
+            print(f'minha cópia agora: {copiaPrim}')
+            if copiaPrim == True:
+                msg = {'res': -1}
+                enviaMensagem(msg, clisock)
+                return
+            else:
+                msg = {'res': 0}
+                enviaMensagem(msg, clisock)
+                return
         else:
-            data_str = str(data, encoding='utf-8')
-            print(str(endr) + ': ' + data_str)
-            splited_data = data_str[1:-1].split(',')
-            replica_id = int(splited_data[0])
-            novoValorX = int(splited_data[1])
-            mutex.acquire()
-            updateX(replica_id, novoValorX)
-            mutex.release()
+            msg = {'res': 0}
+            enviaMensagem(msg, clisock)
+            return
+
+def getX():
+    global x
+    print(f"x = {x}")
+    
+# retorna o histórico de alterações do valor de x
+def getHist():
+    return hist
+    
+def setX(newX, replicaId):
+    
+    global x
+    
+    if(copiaPrim):
+        x = newX
+        res = updateHist(replicaId, x)
+        print(f"Valor de x alterado para {newX} pela réplica {replicaId}")
+        return x
+    else:
+        print('vou pedir a cópia primária')
+        print(f'minha copia: {copiaPrim}')
+        # pede cópia primária
+        sock = socket.socket()
+        res = pedeCopiaPrim(sock)
+        if res == -1:
+            print('Não foi possível obter a cópia primária')
+            sock.close()
+        else:
+            updateCopia()
+            print(f'agora minha copia: {copiaPrim}')
+            x = newX
+            res = updateHist(replicaId, x)
+            print(f"Valor de x alterado para {newX} pela réplica {replicaId}")
+            sock.close()
+            return x
+    
+# pede cópia primária
+def pedeCopiaPrim(sock):
+    msg = {'operacao': 'updateCopia'}
+    for replica in replicas:
+        sock.connect(replica)
+        enviaMensagem(msg, sock)
+        res = recebeMensagem(sock)
+        if int(res['res']) == -1:
+            return -1
+    return 0
+
+# atualiza o histórico de alterações com a tupla (replicaId, novoValorDeX)
+def updateHist(replicaId, novoValor):
+    if(len(hist) == 0):
+        hist.append((replicaId, novoValor))
+    else:
+        if(hist[-1][0] == replicaId):
+            hist[-1] = (replicaId, novoValor)
+        else:
+            hist.append((replicaId, novoValor))
+    return hist
+
 
 def main():
-    clientes=[] #armazena as threads criadas para fazer join
+    global id
     sock = init()
-    print("Pronto para receber conexoes...")
     while True:
-		#espera por qualquer entrada de interesse
+        print('Digite um comando: ')
+        #espera por qualquer entrada de interesse
         leitura, escrita, excecao = select.select(entradas, [], [])
-		#tratar todas as entradas prontas
+        #tratar todas as entradas prontas
         for pronto in leitura:
             if pronto == sock:  #pedido novo de conexao
                 clisock, endr = aceitaConexao(sock)
                 print ('Conectado com: ', endr)
-				#cria nova thread para atender o cliente
-                cliente = threading.Thread(target=atendeRequisicoes, args=(clisock,endr))
-                cliente.start()
-                clientes.append(cliente) #armazena a referencia da thread para usar com join()
+                
+                atendeRequisicoes(clisock, endr)
+                #cria nova thread para atender o cliente
+                # cliente = threading.Thread(target=atendeRequisicoes, args=(clisock,endr))
+                # cliente.start()
+                # clientes.append(cliente) #armazena a referencia da thread para usar com join()
             elif pronto == sys.stdin: #entrada padrao
                 cmd = input()
                 if cmd == 'fim': #solicitacao de finalizacao do servidor
-                    for c in clientes: #aguarda todas as threads terminarem
-                        c.join()
                     sock.close()
                     sys.exit()
-                elif cmd == 'hist': #outro exemplo de comando para o servidor
-                    print(getHist())
-                elif cmd == 'x':
-                    print(getX())
                 elif cmd == 'atualiza':
                     novoValor = input('digite o novo valor de X: ')
-                    mutex.acquire()
-                    updateX(id, novoValor)
-                    mutex.release()
+                    res = setX(novoValor, id)
+                    updateReplicas(res)
+                    getX()
+                elif cmd == 'x':
+                    getX()
+                elif cmd == 'hist':
+                    print(getHist())
+                else:
+                    print('comando não reconhecido.')
+                        
+main()
